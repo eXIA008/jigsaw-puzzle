@@ -10,6 +10,7 @@ INPUT_DIR = "hasil"
 T_STRIP = 3
 TAU = 2500.0
 MAX_CANDIDATES = 5
+MAX_NODES = 200000
 SAVE = True
 SHOW = True
 
@@ -66,95 +67,192 @@ def extract_edge(img, side, t=3):
     return img[:, -t:, ...]
 
 
-def edge_similarity(a, b):
-    d = a.astype(np.float32) - b.astype(np.float32)
+def _as_rows(strip, side):
+    s = strip.astype(np.float32)
+    return np.swapaxes(s, 0, 1) if side in ("left", "right") else s
+
+
+def seam_cost(before, after, side_before):
+    a = _as_rows(before, side_before)
+    b = _as_rows(after, "top" if side_before == "bottom" else "left")
+    d = a - b
     return float(np.mean(d * d))
 
 
-def total_score(cand, ref_top, ref_left, ref_bottom=None, ref_right=None, t=3):
-    s = 0.0
-    if ref_top is not None:
-        s += edge_similarity(extract_edge(cand, "top", t), ref_top)
-    if ref_left is not None:
-        s += edge_similarity(extract_edge(cand, "left", t), ref_left)
-    if ref_bottom is not None:
-        s += edge_similarity(extract_edge(cand, "bottom", t), ref_bottom)
-    if ref_right is not None:
-        s += edge_similarity(extract_edge(cand, "right", t), ref_right)
-    return s
-
-
-def solve(pieces, ring, meta, t=3, tau=TAU, max_candidates=MAX_CANDIDATES, steps=None):
+def seam_parts(cand, r, c, grid, ring, meta, t):
     m = meta["m"]
-    ph, pw = meta["piece_size"]
-    n = m * m
-    has_ring = meta["has_ring"]
+    tk = min(t, meta["hint_width"]) if ring else t
+    parts = []
+    if r > 0:
+        parts.append(seam_cost(extract_edge(grid[r - 1][c][2], "bottom", t),
+                               extract_edge(cand, "top", t), "bottom"))
+    elif ring:
+        parts.append(seam_cost(ring_slice(ring, "top", c, meta, tk),
+                               extract_edge(cand, "top", tk), "bottom"))
+    if c > 0:
+        parts.append(seam_cost(extract_edge(grid[r][c - 1][2], "right", t),
+                               extract_edge(cand, "left", t), "right"))
+    elif ring:
+        parts.append(seam_cost(ring_slice(ring, "left", r, meta, tk),
+                               extract_edge(cand, "left", tk), "right"))
+    if r == m - 1 and ring:
+        parts.append(seam_cost(extract_edge(cand, "bottom", tk),
+                               ring_slice(ring, "bottom", c, meta, tk), "bottom"))
+    if c == m - 1 and ring:
+        parts.append(seam_cost(extract_edge(cand, "right", tk),
+                               ring_slice(ring, "right", r, meta, tk), "right"))
+    return parts
+
+
+def total_score(cand, r, c, grid, ring, meta, t):
+    costs = seam_parts(cand, r, c, grid, ring, meta, t)
+    return float(np.mean(costs)) if costs else 0.0
+
+
+def _grid_seam_mean(grid, ring, meta, t):
+    costs = []
+    for r, row in enumerate(grid):
+        for c, cell in enumerate(row):
+            if cell is not None:
+                costs += seam_parts(cell[2], r, c, grid, ring, meta, t)
+    return float(np.mean(costs)) if costs else 0.0
+
+
+class _Budget(Exception):
+    pass
+
+
+def _attempt(pieces, ring, meta, tau, max_candidates, t, max_nodes, steps=None, stop_mean=None):
+    m = meta["m"]
+    shape0 = tuple(meta["piece_size"])
     grid = [[None] * m for _ in range(m)]
-    gaps = [None] * n
-    confs = [None] * n
     used = set()
-
-    rots = {}
-    for pid, img in pieces.items():
-        variants = []
-        for rot in range(4):
-            im = np.rot90(img, rot)
-            if im.shape[:2] == (ph, pw):
-                variants.append((rot, np.ascontiguousarray(im)))
-        rots[pid] = variants
-
-    def refs_for(r, c):
-        top = left = bottom = right = None
-        if r == 0:
-            if has_ring:
-                top = ring_slice(ring, "top", c, meta, t)
-        else:
-            top = extract_edge(grid[r - 1][c][2], "bottom", t)
-        if c == 0:
-            if has_ring:
-                left = ring_slice(ring, "left", r, meta, t)
-        else:
-            left = extract_edge(grid[r][c - 1][2], "right", t)
-        if r == m - 1 and has_ring:
-            bottom = ring_slice(ring, "bottom", c, meta, t)
-        if c == m - 1 and has_ring:
-            right = ring_slice(ring, "right", r, meta, t)
-        return top, left, bottom, right
+    best = {"depth": -1, "grid": None}
+    nodes = [0]
+    budget_hit = [False]
+    best_completion = [None, None, None]
+    gap_map = {}
 
     def backtrack(pos):
-        if pos == n:
-            return True
+        if pos > best["depth"]:
+            best["depth"] = pos
+            best["grid"] = [row[:] for row in grid]
+        if pos == m * m:
+            if ring is not None or stop_mean is None:
+                return True
+            mean = _grid_seam_mean(grid, ring, meta, t)
+            if best_completion[0] is None or mean < best_completion[0]:
+                best_completion[0] = mean
+                best_completion[1] = [row[:] for row in grid]
+                best_completion[2] = dict(gap_map)
+            return False
+        nodes[0] += 1
+        if nodes[0] > max_nodes:
+            budget_hit[0] = True
+            raise _Budget
         r, c = divmod(pos, m)
-        top, left, bottom, right = refs_for(r, c)
-        n_refs = sum(x is not None for x in (top, left, bottom, right))
         cands = []
-        for pid, variants in rots.items():
-            if pid in used:
+        for name, img in pieces.items():
+            if name in used:
                 continue
-            for rot, im in variants:
-                s = total_score(im, top, left, bottom, right, t)
-                avg = s / n_refs if n_refs else 0.0
-                if avg <= tau:
-                    cands.append((avg, pid, rot, im))
+            for rot in range(4):
+                im = np.rot90(img, rot)
+                if im.shape[:2] != shape0:
+                    continue
+                s = total_score(im, r, c, grid, ring, meta, t)
+                if s <= tau:
+                    cands.append((s, name, rot, im))
         cands.sort(key=lambda x: x[0])
-        gaps[pos] = cands[1][0] - cands[0][0] if len(cands) >= 2 else None
-        if gaps[pos] is not None:
-            best = cands[0][0]
-            confs[pos] = gaps[pos] / (best + gaps[pos]) if (best + gaps[pos]) > 0 else 0.0
-        for avg, pid, rot, im in cands[:max_candidates]:
-            grid[r][c] = (pid, rot, im, avg)
-            used.add(pid)
+        window = max_candidates
+        if pos == 0 and ring is None:
+            window = len(cands)
+        for i, (s, name, rot, im) in enumerate(cands[:window]):
+            gap_map[pos] = cands[i + 1][0] - s if i + 1 < len(cands) else float("inf")
+            grid[r][c] = (name, rot, im, s)
+            used.add(name)
             if steps is not None:
-                steps.append({"type": "place", "pos": pos, "pid": pid, "rot": rot, "score": avg})
+                steps.append({"type": "place", "pos": pos, "pid": name,
+                              "rot": ((4 - rot) % 4) * 90, "score": s})
             if backtrack(pos + 1):
                 return True
             grid[r][c] = None
-            used.remove(pid)
+            used.discard(name)
             if steps is not None:
-                steps.append({"type": "unplace", "pos": pos, "pid": pid, "rot": rot})
+                steps.append({"type": "unplace", "pos": pos, "pid": name,
+                              "rot": ((4 - rot) % 4) * 90})
         return False
 
-    ok = backtrack(0)
+    try:
+        ok = backtrack(0)
+    except _Budget:
+        ok = False
+    if ring is not None or stop_mean is None:
+        return (grid if ok else best["grid"]), ok, gap_map, None, budget_hit[0]
+    if best_completion[0] is not None and best_completion[0] <= stop_mean:
+        return best_completion[1], True, best_completion[2], best_completion[0], budget_hit[0]
+    if best_completion[0] is not None:
+        return best_completion[1], False, best_completion[2], best_completion[0], budget_hit[0]
+    return (grid if ok else best["grid"]), False, gap_map, None, budget_hit[0]
+
+
+def solve(pieces, ring, meta, t=T_STRIP, tau=TAU, max_candidates=MAX_CANDIDATES, steps=None):
+    taus = [tau * 2 ** i for i in range(5)] + [float("inf")]
+    best_partial = None
+    best_completed = None
+    selected = None
+    ok = False
+    last_level = 0
+    for level, tv in enumerate(taus):
+        last_level = level
+        if steps:
+            steps.clear()
+        grid_a, ok_a, gap_map_a, mean_a, budget_a = _attempt(
+            pieces, ring, meta, tv, max_candidates, t, MAX_NODES, steps,
+            stop_mean=None if ring is not None else tau)
+        if ok_a:
+            selected = (grid_a, gap_map_a, level)
+            ok = True
+            print(f"Solusi ditemukan dengan tau={tv}")
+            break
+        if ring is not None:
+            print(f"Buntu pada tau={tv}, melonggarkan ambang...")
+            placed = sum(1 for row in grid_a for cell in row if cell is not None)
+            if best_partial is None or placed > best_partial[0]:
+                best_partial = (placed, grid_a, gap_map_a, level)
+            continue
+        if mean_a is not None:
+            if best_completed is None or mean_a < best_completed[0]:
+                best_completed = (mean_a, grid_a, gap_map_a, level)
+            if not budget_a:
+                break
+        placed = sum(1 for row in grid_a for cell in row if cell is not None)
+        if best_partial is None or placed > best_partial[0]:
+            best_partial = (placed, grid_a, gap_map_a, level)
+    if selected is None and best_completed is not None:
+        _, grid_a, gap_map_a, level = best_completed
+        selected = (grid_a, gap_map_a, level)
+        ok = True
+        print(f"Solusi tersusun dengan tau={taus[level]}")
+    if selected is None and best_partial is not None:
+        _, grid_a, gap_map_a, level = best_partial
+        selected = (grid_a, gap_map_a, level)
+    if selected is not None and steps is not None and selected[2] != last_level:
+        steps.clear()
+        _attempt(pieces, ring, meta, taus[selected[2]], max_candidates, t, MAX_NODES, steps,
+                 stop_mean=None if ring is not None else tau)
+    if selected is None:
+        return None, False, [], []
+    grid, gap_map, _ = selected
+    m = meta["m"]
+    gaps = [None] * (m * m)
+    confs = [None] * (m * m)
+    for pos in range(m * m):
+        r, c = divmod(pos, m)
+        cell = grid[r][c]
+        if cell is not None and np.isfinite(gap_map.get(pos, float("inf"))):
+            g = gap_map[pos]
+            gaps[pos] = g
+            confs[pos] = g / (cell[3] + g) if (cell[3] + g) > 0 else 0.0
     return grid, ok, gaps, confs
 
 
@@ -212,8 +310,6 @@ def main():
     a = ap.parse_args()
 
     meta = load_hint_meta(os.path.join(a.input_dir, "hint_meta.json"))
-    if meta["placement"] != "split":
-        raise SystemExit(f"placement '{meta['placement']}' belum didukung (hanya 'split')")
 
     m = meta["m"]
     pieces = load_pieces(a.input_dir)
@@ -221,10 +317,11 @@ def main():
         raise SystemExit(f"jumlah potongan {len(pieces)} != m*m = {m * m}")
 
     ring = load_ring(a.input_dir) if meta["has_ring"] else None
-    ph, pw = meta["piece_size"]
-    t = max(1, min(a.t, ph, pw))
+    t = a.t
     if meta["has_ring"]:
         t = min(t, meta["hint_width"])
+    else:
+        print("PERINGATAN: tanpa ring, pencocokan hanya antar potongan (rentan ambigu).")
 
     start = time.perf_counter()
     grid, ok, gaps, confs = solve(pieces, ring, meta, t=t, tau=a.tau, max_candidates=a.max_candidates)

@@ -24,6 +24,18 @@ def _clean_out(out_dir):
             shutil.rmtree(d)
 
 
+def hint_kmax(m, path=None, uploaded=None):
+    img = None
+    if uploaded is not None:
+        img = cv2.imdecode(np.frombuffer(uploaded.getbuffer(), np.uint8), cv2.IMREAD_UNCHANGED)
+    elif path and os.path.isfile(path):
+        img = cv2.imread(path, cv2.IMREAD_UNCHANGED)
+    if img is None:
+        return None
+    h, w = img.shape[:2]
+    return max(1, min(h // m, w // m) // 4)
+
+
 def generate_puzzle(input_path, out_dir, m=3, hint_width=100, placement="split",
                     fit_mode="crop", rotate=False, seed=None, save_files=True,
                     save_truth=True):
@@ -96,8 +108,6 @@ def generate_puzzle(input_path, out_dir, m=3, hint_width=100, placement="split",
 
 def solve_puzzle(input_dir, t=3, tau=2500.0, max_candidates=5, save=True, record_steps=True):
     meta = solver.load_hint_meta(os.path.join(input_dir, "hint_meta.json"))
-    if meta["placement"] != "split":
-        raise ValueError(f"placement '{meta['placement']}' belum didukung (hanya 'split')")
 
     m = meta["m"]
     pieces = solver.load_pieces(input_dir)

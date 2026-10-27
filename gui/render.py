@@ -44,20 +44,33 @@ def piece_montage(pieces, cols=None, cell=140, pad=8, bg=(250, 250, 250)):
     return canvas
 
 
+def strip_band_image(piece, t, cell=256):
+    img = cv2.resize(to_rgb(piece), (cell, cell), interpolation=cv2.INTER_AREA)
+    band = max(2, int(round(t * cell / piece.shape[0])))
+    band = min(band, cell // 3)
+    out = img.copy()
+    fill = out.copy()
+    cv2.rectangle(fill, (0, 0), (cell - 1, band - 1), (255, 75, 75), -1)
+    out = cv2.addWeighted(fill, 0.35, out, 0.65, 0)
+    cv2.rectangle(out, (0, 0), (cell - 1, band - 1), (194, 31, 31), max(2, cell // 110))
+    return out
+
+
 def board_state_image(pieces_by_name, steps, upto, m, cell=120, pad=6):
     state = {}
     for ev in steps[:upto]:
         if ev["type"] == "place":
-            state[ev["pos"]] = ev["pid"]
+            state[ev["pos"]] = (ev["pid"], ev["rot"])
         else:
             state.pop(ev["pos"], None)
 
     grid_px = m * (cell + pad) + pad
     canvas = np.full((grid_px, grid_px, 3), (238, 240, 243), np.uint8)
-    for pos, pid in state.items():
+    for pos, (pid, rot) in state.items():
         r, c = divmod(pos, m)
         y, x = pad + r * (cell + pad), pad + c * (cell + pad)
-        thumb = cv2.resize(to_rgb(pieces_by_name[pid]), (cell, cell), interpolation=cv2.INTER_AREA)
+        img = np.rot90(to_rgb(pieces_by_name[pid]), (4 - rot // 90) % 4)
+        thumb = cv2.resize(np.ascontiguousarray(img), (cell, cell), interpolation=cv2.INTER_AREA)
         canvas[y:y + cell, x:x + cell] = thumb
 
     if upto > 0:

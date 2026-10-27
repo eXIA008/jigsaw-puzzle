@@ -27,7 +27,8 @@ def _resolve_dir():
 
 def render():
     with st.sidebar:
-        st.markdown("### Solver")
+        st.markdown("**Puzzle Solver**")
+        st.caption("Mode untuk menyusun kembali puzzle secara otomatis.")
         sources = ["Hasil sesi ini", "Unggah ZIP"]
         if not rv.is_cloud():
             sources.append("Folder lokal")
@@ -36,10 +37,23 @@ def render():
             st.file_uploader("ZIP hasil generate", type=["zip"], key="sol_zip")
         elif st.session_state.get("sol_src") == "Folder lokal":
             st.text_input("Folder hasil", value="hasil", key="sol_dir")
-        st.number_input("t (tebal strip)", min_value=1, max_value=16, value=3, step=1, key="sol_t")
-        st.number_input("tau (ambang MSE)", min_value=0.0, value=2500.0, step=100.0,
-                        format="%.1f", key="sol_tau")
-        st.number_input("Max kandidat", min_value=1, max_value=20, value=5, step=1, key="sol_maxc")
+
+        st.markdown("**Parameter solve**")
+        st.slider(
+            "t (tebal strip)", 1, 16, 3, key="sol_t",
+            help="Tebal band tepi yang dicocokkan, dalam piksel. Solver membandingkan band ini antar potongan "
+                 "bersebelahan dan terhadap ring; makin tebal, makin banyak baris yang ikut dalam rata-rata MSE sambungan.",
+        )
+        st.slider(
+            "tau (ambang MSE)", 0.0, 10000.0, 2500.0, step=100.0, key="sol_tau",
+            help="Skor sambungan di atas nilai ini tidak dijadikan kandidat. Bila solver buntu, ambang dilonggarkan "
+                 "otomatis sampai lima kali sebelum akhirnya diabaikan.",
+        )
+        st.slider(
+            "Max kandidat", 1, 20, 5, key="sol_maxc",
+            help="Banyak kandidat terbaik yang dicoba per sel saat backtracking. Nilai besar aman untuk potongan yang "
+                 "mirip, tetapi pencarian makin lambat.",
+        )
         run = st.button("Solve", type="primary", width="stretch", key="sol_run")
 
     if run:
@@ -54,13 +68,12 @@ def render():
                 )
             result["input_dir"] = input_dir
             st.session_state.solve_result = result
+            st.session_state["sol_step"] = len(result["steps"])
             meta = result["solve_meta"]
             filled = len(result["solution"])
             total = result["m"] * result["m"]
             status = "berhasil" if result["ok"] else "gagal"
-            st.success(
-                f"Solve {status}: {filled}/{total} potongan terisi dalam {meta['time_s']} s."
-            )
+            st.success(f"Solve {status}: {filled}/{total} potongan terisi dalam {meta['time_s']} s.")
         except (ValueError, FileNotFoundError, OSError) as exc:
             st.error(str(exc))
 
@@ -72,18 +85,21 @@ def render():
     meta = result["solve_meta"]
     m = result["m"]
     total = m * m
-    c1, c2, c3, c4 = st.columns(4)
-    c1.metric("Status", "ok" if result["ok"] else "gagal")
-    c2.metric("Terisi", f"{len(result['solution'])}/{total}")
-    c3.metric("Waktu solve", f"{meta['time_s']} s")
     gap = meta.get("gap_mean")
-    c4.metric("Gap mean", "-" if gap is None else str(gap))
+    conf = meta.get("confidence_mean")
+
+    st.markdown("## Hasil solve")
+    st.markdown(f"**Status:** `{'ok' if result['ok'] else 'gagal'}`")
+    st.markdown(f"**Terisi:** `{len(result['solution'])}/{total}`")
+    st.markdown(f"**Waktu solve:** `{meta['time_s']} s`")
+    st.markdown(f"**Gap mean:** `{'-' if gap is None else gap}`")
+    st.markdown(f"**Confidence mean:** `{'-' if conf is None else conf}`")
 
     if result["reconstructed"] is not None:
-        st.image(rv.to_rgb(result["reconstructed"]), caption="Rekonstruksi solver",
-                 width="stretch")
+        st.markdown("### Rekonstruksi")
+        st.image(rv.to_rgb(result["reconstructed"]), width="stretch")
         st.download_button(
-            "Unduh reconstructed.png",
+            "Unduh Hasil Rekonstruksi",
             data=_png_bytes(result["reconstructed"]),
             file_name="reconstructed.png",
             key="sol_png",
@@ -95,14 +111,24 @@ def render():
             key="sol_json",
         )
 
-    st.markdown("#### Animasi langkah")
+    st.markdown("### Band strip yang dibandingkan")
+    piece_name = sorted(result["pieces"])[0]
+    st.image(rv.strip_band_image(result["pieces"][piece_name], meta["t"]), width=256)
+    st.caption(
+        f"Band merah setebal {meta['t']} piksel pada tepi potongan ini yang dicocokkan: sisi atas potongan dibandingkan "
+        "dengan sisi bawah potongan tetangganya (atau ring), dihitung sebagai rata-rata MSE sepanjang band. "
+        "Makin tebal t, makin banyak baris yang ikut dihitung dan waktu solve naik."
+    )
+
+    st.markdown("### Animasi langkah")
     steps = result["steps"]
-    st.caption(f"{len(steps)} langkah backtracking (place dan unplace).")
-    n = max(1, len(steps))
-    step_i = st.slider("Langkah ke-", 0, len(steps), len(steps), key="sol_step",
-                       disabled=not steps)
+    if not steps:
+        st.info("Tidak ada langkah backtracking terekam (tidak ada kandidat yang lolos tau).")
+        return
+    st.caption(f"{len(steps)} langkah backtracking.")
+    step_i = st.slider("Langkah ke-", 0, len(steps), key="sol_step")
     board_slot = st.empty()
-    if st.button("Putar animasi", key="sol_play") and steps:
+    if st.button("Putar animasi", key="sol_play"):
         for i in range(1, len(steps) + 1):
             board_slot.image(
                 rv.board_state_image(result["pieces"], steps, i, m),
@@ -113,10 +139,10 @@ def render():
         rv.board_state_image(result["pieces"], steps, step_i, m),
         width="stretch",
     )
-    if steps and step_i > 0:
+    if step_i > 0:
         ev = steps[step_i - 1]
         act = "pasang" if ev["type"] == "place" else "lepas"
-        st.caption(f"Langkah {step_i}: {act} {ev['pid']} di posisi {ev['pos']} (rotasi {ev['rot']}°).")
+        st.caption(f"Langkah {step_i}: {act} {ev['pid']} di posisi {ev['pos']} (rotasi {ev['rot']} derajat).")
 
 
 def _png_bytes(img):

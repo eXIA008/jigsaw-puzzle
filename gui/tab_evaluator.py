@@ -30,7 +30,9 @@ def _resolve_dir():
 
 def render():
     with st.sidebar:
-        st.markdown("### Evaluate")
+        st.markdown("**Puzzle Evaluator**")
+        st.caption("Mode untuk menilai kualitas hasil solve. " \
+        "Pengguna memilih sumber data hasil solve dan ground truth (misalnya dari hasil sesi ini), lalu menekan tombol Evaluasi.")
         sources = ["Hasil sesi ini", "Unggah file"]
         if not rv.is_cloud():
             sources.append("Folder lokal")
@@ -59,20 +61,17 @@ def render():
     total = metrics["total"] or 0
     acc_pos = 100 * metrics["pos_ok"] / total if total else 0.0
     acc_rot = 100 * metrics["rot_ok"] / total if metrics["rot_checked"] else None
-
-    c1, c2, c3, c4 = st.columns(4)
-    c1.metric("Akurasi posisi", f"{acc_pos:.1f}%")
-    c2.metric("Akurasi rotasi", "n/a" if acc_rot is None else f"{acc_rot:.1f}%")
-    c3.metric("Potongan", str(total))
     solve_meta = result["solve_meta"] or {}
-    c4.metric("Waktu solve", f"{solve_meta.get('time_s', '-')} s")
-
     gap = solve_meta.get("gap_mean")
     conf = solve_meta.get("confidence_mean")
-    st.caption(
-        f"Gap mean: {'-' if gap is None else gap}  |  "
-        f"Confidence mean: {'-' if conf is None else conf}"
-    )
+
+    st.markdown("## Laporan evaluasi")
+    st.markdown(f"**Akurasi posisi:** `{acc_pos:.1f}%`")
+    st.markdown(f"**Akurasi rotasi:** `{'n/a' if acc_rot is None else f'{acc_rot:.1f}%'}`")
+    st.markdown(f"**Potongan:** `{total}`")
+    st.markdown(f"**Waktu solve:** `{solve_meta.get('time_s', '-')} s`")
+    st.markdown(f"**Gap mean:** `{'-' if gap is None else gap}`")
+    st.markdown(f"**Confidence mean:** `{'-' if conf is None else conf}`")
 
     with st.expander("Detail per potongan"):
         if metrics["wrong"]:

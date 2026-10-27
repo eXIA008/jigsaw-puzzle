@@ -14,29 +14,50 @@ def _resolve_image():
     path = (st.session_state.get("gen_path") or "").strip()
     if path:
         return path
-    raise ValueError("Pilih gambar dulu (unggah atau isi path lokal).")
+    raise ValueError("Pilih gambar terlebih dahulu.")
 
 
 def render():
     with st.sidebar:
-        st.markdown("### Generator")
+        st.markdown("**Puzzle Generator**")
+        st.caption("Mode untuk membuat puzzle dari gambar yang diunggah pengguna. ")
         st.file_uploader(
-            "Gambar", type=["png", "jpg", "jpeg", "bmp", "webp", "tif", "tiff"],
-            key="gen_up",
+            "Pilih Gambar", type=["png", "jpg", "jpeg", "bmp", "webp", "tif", "tiff"],
+            key="gen_up")
+
+        st.markdown("**Pengaturan Puzzle**")
+        st.slider(
+            "Ukuran Grid Puzzle", 2, 10, 3, key="gen_m",
+            help="Jumlah potongan per sisi. Nilai m berarti puzzle terdiri dari m x m potongan dengan ukuran kira-kira lebar gambar dibagi m. Semakin besar m, makin kecil tiap potongan.",
         )
+        st.slider(
+            "Ukuran Bingkai", 0, 100, 40, key="gen_hint",
+            help="Tebal ring hint di tepi luar papan, dalam piksel. Ring dibaca solver sebagai petunjuk tepi luar, nilai 0 berarti tanpa petunjuk sehingga solver hanya mengandalkan sambungan antar potongan.",
+        )
+        st.selectbox(
+            "Placement Hint", ["split", "inside", "outside"], key="gen_place",
+            help="Menentukan penempatan ring hint pada bingkai. "
+                 "split: ring dipisah dari gambar, disimpan sebagai petunjuk, dan dipakai solver sebagai tepi luar papan. "
+                 "inside: salinan tepi menempel menutupi tepi papan yang ukurannya sama dengan foto. "
+                 "outside: salinan tepi ditaruh di luar area grid pada papan yang lebih besar dari foto. "
+                 "inside dan outside tidak menghasilkan ring, jadi solver menyusun hanya dari sambungan antar potongan.",
+        )
+        st.selectbox("Mode Ukur Gambar", ["crop", "resize"], key="gen_fit",
+                     help="Mode untuk menentukan ukuran gambar sebelum di proses puzzle generator. 'crop'= Gambar hanya dipotong (lossless pixel)" \
+                     " 'resize'= Gambar dibesarkan/dikecilkan agar tetap terlihat.")
+        st.checkbox(
+            "Rotasi acak potongan", value=True, key="gen_rotate")
+
+        st.markdown("**Pengaturan lain**")
+        st.text_input("Seed", value="", key="gen_seed", 
+                      help="Seed untuk Reproducibility dari puzzle generator. Kosong = hasil selalu acak")
+
+        st.checkbox(
+            "Simpan ground_truth.json", value=True, key="gen_truth")
         if not rv.is_cloud():
-            st.text_input("Atau path gambar (lokal)", value="", key="gen_path",
-                          placeholder="foto.jpg")
-        col1, col2 = st.columns(2)
-        col1.number_input("M (grid)", min_value=2, max_value=8, value=3, step=1, key="gen_m")
-        col2.number_input("Hint width", min_value=0, max_value=64, value=40, key="gen_hint")
-        st.selectbox("Placement hint", ["split", "inside", "outside"], key="gen_place")
-        st.selectbox("Mode ukur gambar", ["crop", "resize"], key="gen_fit")
-        st.checkbox("Rotasi acak potongan", value=True, key="gen_rotate")
-        st.text_input("Seed (kosong = acak)", value="", key="gen_seed")
-        st.checkbox("Simpan ground_truth.json", value=True, key="gen_truth")
-        if not rv.is_cloud():
-            st.text_input("Folder keluaran (kosong = folder sesi)", value="", key="gen_out")
+            st.text_input("Output Path", value="", key="gen_out", 
+            help="Directory atau Folder output dari puzzle generator. Kosong = hasil generator disimpan di folder sesi")
+
         run = st.button("Generate", type="primary", width="stretch", key="gen_run")
 
     if run:
@@ -70,26 +91,28 @@ def render():
         st.info("Belum ada hasil. Pilih gambar, atur parameter, lalu tekan Generate.")
         return
 
-    c1, c2, c3 = st.columns(3)
-    with c1:
-        st.image(rv.to_rgb(result["raw"]), caption="Gambar asli", width="stretch")
-    with c2:
-        st.image(rv.to_rgb(result["frame"]), caption="Bingkai", width="stretch")
-    with c3:
-        montage = rv.piece_montage(result["pieces"])
-        if montage is not None:
-            st.image(montage, caption=f"Potongan ({result['count']}, diacak)", width="stretch")
+    st.markdown("## Hasil generate")
+    st.markdown(f"**Grid:** `{result['m']} x {result['m']}`")
+    st.markdown(f"**Potongan:** `{result['count']}`")
+    st.markdown(f"**Ukuran papan:** `{result['image'].shape[1]} x {result['image'].shape[0]} px`")
+    st.markdown(f"**Ukuran potongan:** `{result['piece_size'][1]} x {result['piece_size'][0]} px`")
+    st.markdown(f"**Hint width:** `{result['hint_width']}`")
 
-    st.caption(
-        f"Ukuran papan {result['image'].shape[1]}x{result['image'].shape[0]} px, "
-        f"grid {result['m']}x{result['m']}, potongan {result['piece_size'][1]}x{result['piece_size'][0]} px, "
-        f"hint width {result['hint_width']}"
-    )
+    st.markdown("### Gambar asli")
+    st.image(rv.to_rgb(result["raw"]), width="stretch")
+
+    st.markdown("### Bingkai")
+    st.image(rv.to_rgb(result["frame"]), width="stretch")
+
+    st.markdown("### Potongan (diacak)")
+    montage = rv.piece_montage(result["pieces"])
+    if montage is not None:
+        st.image(montage, width="stretch")
 
     out_dir = st.session_state.get("last_gen_dir")
     if out_dir and os.path.isdir(out_dir):
         st.download_button(
-            "Unduh ZIP hasil",
+            "Unduh ZIP Hasil",
             data=rv.zip_dir_bytes(out_dir),
             file_name="hasil_puzzle.zip",
             key="gen_zip",
