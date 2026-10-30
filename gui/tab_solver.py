@@ -30,8 +30,6 @@ def render():
         st.markdown("**Puzzle Solver**")
         st.caption("Mode untuk menyusun kembali puzzle secara otomatis.")
         sources = ["Hasil sesi ini", "Unggah ZIP"]
-        if not rv.is_cloud():
-            sources.append("Folder lokal")
         st.selectbox("Sumber data", sources, key="sol_src")
         if st.session_state.get("sol_src") == "Unggah ZIP":
             st.file_uploader("ZIP hasil generate", type=["zip"], key="sol_zip")
@@ -97,7 +95,7 @@ def render():
 
     if result["reconstructed"] is not None:
         st.markdown("### Rekonstruksi")
-        st.image(rv.to_rgb(result["reconstructed"]), width="stretch")
+        st.image(rv.to_rgb(result["reconstructed"]), width=1500)
         st.download_button(
             "Unduh Hasil Rekonstruksi",
             data=_png_bytes(result["reconstructed"]),
@@ -125,24 +123,28 @@ def render():
     if not steps:
         st.info("Tidak ada langkah backtracking terekam (tidak ada kandidat yang lolos tau).")
         return
-    st.caption(f"{len(steps)} langkah backtracking.")
-    step_i = st.slider("Langkah ke-", 0, len(steps), key="sol_step")
-    board_slot = st.empty()
-    if st.button("Putar animasi", key="sol_play"):
-        for i in range(1, len(steps) + 1):
-            board_slot.image(
-                rv.board_state_image(result["pieces"], steps, i, m),
-                width="stretch",
-            )
-            time.sleep(0.12)
-    board_slot.image(
-        rv.board_state_image(result["pieces"], steps, step_i, m),
-        width="stretch",
+    st.caption(
+        f"{len(steps)} langkah backtracking terekam. "
+        "Pemutar interaktif di bawah berjalan langsung di browser (client-side) sehingga animasi lancar dan bebas jeda di Streamlit Cloud."
     )
-    if step_i > 0:
-        ev = steps[step_i - 1]
-        act = "pasang" if ev["type"] == "place" else "lepas"
-        st.caption(f"Langkah {step_i}: {act} {ev['pid']} di posisi {ev['pos']} (rotasi {ev['rot']} derajat).")
+    hint_meta = result.get("meta") or {}
+    rec_img = result.get("reconstructed")
+    if rec_img is not None and getattr(rec_img, "ndim", 0) >= 2:
+        rh, rw = rec_img.shape[:2]
+        piece_size = (rh // m, rw // m)
+    elif "piece_size" in hint_meta:
+        piece_size = hint_meta["piece_size"]
+    else:
+        piece_size = None
+    rv.render_solver_player(result["pieces"], steps, m, piece_size=piece_size)
+
+    st.download_button(
+        "Unduh Animasi Backtracking (GIF)",
+        data=rv.steps_to_gif_bytes(result["pieces"], steps, m, piece_size=piece_size),
+        file_name="backtracking_animation.gif",
+        mime="image/gif",
+        key="sol_gif",
+    )
 
 
 def _png_bytes(img):

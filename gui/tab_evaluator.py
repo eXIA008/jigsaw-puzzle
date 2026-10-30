@@ -34,8 +34,6 @@ def render():
         st.caption("Mode untuk menilai kualitas hasil solve. " \
         "Pengguna memilih sumber data hasil solve dan ground truth (misalnya dari hasil sesi ini), lalu menekan tombol Evaluasi.")
         sources = ["Hasil sesi ini", "Unggah file"]
-        if not rv.is_cloud():
-            sources.append("Folder lokal")
         st.selectbox("Sumber data", sources, key="ev_src")
         if st.session_state.get("ev_src") == "Unggah file":
             st.file_uploader("solution.json", type=["json"], key="ev_sol")

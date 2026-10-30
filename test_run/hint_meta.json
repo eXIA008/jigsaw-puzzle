@@ -1,0 +1,10 @@
+{
+  "m": 3,
+  "hint_width": 30,
+  "placement": "split",
+  "piece_size": [
+    183,
+    168
+  ],
+  "has_ring": true
+}
