@@ -46,27 +46,30 @@ def load_ring(input_dir):
     return ring
 
 
-def _calc_edge_dissimilarity(strip1, strip2, t=1):
+def _calc_edge_dissimilarity(strip1, strip2, t=3):
     """
     Operasi Aritmatika Pengurangan Citra g(x,y) = |f(x,y) - h(x,y)|
-    dikombinasikan dengan Konvolusi Filter Spasial Diferensial 1D (w03 & w06).
+    dikombinasikan dengan Konvolusi Filter Gradien Spasial Dinamis
     """
-    # Konversi tipe data matriks ke float32 untuk menghindari overflow uint8
     s1 = strip1.astype(np.float32)
     s2 = strip2.astype(np.float32)
 
-    # 1. Operasi Aritmatika Pengurangan Citra pada garis pertemuan batas terluar
-    # s1[-1] adalah baris terakhir keping atas/kiri, s2[0] adalah baris awal keping bawah/kanan
+    # 1. Operasi Aritmatika Pengurangan Citra pada garis pertemuan terluar
     diff_direct = np.abs(s1[-1] - s2[0])
     l1_cost = float(np.mean(diff_direct))
 
-    # 2. Filter Diferensial Turunan Gradien Pertama jika pita ketetanggaan t >= 2
-    if t >= 2 and s1.shape[0] >= 2 and s2.shape[0] >= 2:
-        grad1 = s1[-1] - s1[-2]
-        grad2 = s2[1] - s2[0]
+    # 2. Filter Diferensial Spasial
+    actual_depth = min(s1.shape[0], s2.shape[0])
+    if actual_depth >= 2:
+        grad1 = np.diff(s1, axis=0) 
+        grad2 = np.diff(s2, axis=0) 
 
-        # Estimasi kontinuitas alur garis spasial 
-        grad_continuity_error = np.abs(grad1 - grad2)
+        # Menghitung rata-rata arah gradien di sepanjang kedalaman pita t
+        mean_grad1 = np.mean(grad1, axis=0)
+        mean_grad2 = np.mean(grad2, axis=0)
+
+        # Evaluasi deviasi kesinambungan gradien
+        grad_continuity_error = np.abs(mean_grad1 - mean_grad2)
         grad_cost = float(np.mean(grad_continuity_error))
 
         return l1_cost + 0.5 * grad_cost
