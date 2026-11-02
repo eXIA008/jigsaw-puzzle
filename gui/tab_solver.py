@@ -1,6 +1,7 @@
 import os
 import time
 
+import cv2
 import streamlit as st
 
 import gui.render as rv
@@ -27,32 +28,26 @@ def _resolve_dir():
 
 def render():
     with st.sidebar:
-        st.markdown("**Puzzle Solver**")
-        st.caption("Mode untuk menyusun kembali puzzle secara otomatis.")
-        sources = ["Hasil sesi ini", "Unggah ZIP"]
-        st.selectbox("Sumber data", sources, key="sol_src")
-        if st.session_state.get("sol_src") == "Unggah ZIP":
-            st.file_uploader("ZIP hasil generate", type=["zip"], key="sol_zip")
-        elif st.session_state.get("sol_src") == "Folder lokal":
-            st.text_input("Folder hasil", value="hasil", key="sol_dir")
+      st.markdown("**Puzzle Solver**")
+      st.caption("Mode untuk menyusun kembali puzzle secara otomatis.")
+      sources = ["Hasil sesi ini", "Unggah ZIP"]
+      st.selectbox("Sumber data", sources, key="sol_src")
+      if st.session_state.get("sol_src") == "Unggah ZIP":
+          st.file_uploader("ZIP hasil generate", type=["zip"], key="sol_zip")
+      elif st.session_state.get("sol_src") == "Folder lokal":
+          st.text_input("Folder hasil", value="hasil", key="sol_dir")
 
-        st.markdown("**Parameter solve**")
-        st.slider(
-            "t (tebal strip)", 1, 16, 3, key="sol_t",
-            help="Tebal band tepi yang dicocokkan, dalam piksel. Solver membandingkan band ini antar potongan "
-                 "bersebelahan dan terhadap ring; makin tebal, makin banyak baris yang ikut dalam rata-rata MSE sambungan.",
-        )
-        st.slider(
-            "tau (ambang MSE)", 0.0, 10000.0, 2500.0, step=100.0, key="sol_tau",
-            help="Skor sambungan di atas nilai ini tidak dijadikan kandidat. Bila solver buntu, ambang dilonggarkan "
-                 "otomatis sampai lima kali sebelum akhirnya diabaikan.",
-        )
-        st.slider(
-            "Max kandidat", 1, 20, 5, key="sol_maxc",
-            help="Banyak kandidat terbaik yang dicoba per sel saat backtracking. Nilai besar aman untuk potongan yang "
-                 "mirip, tetapi pencarian makin lambat.",
-        )
-        run = st.button("Solve", type="primary", width="stretch", key="sol_run")
+      with st.expander("Pengaturan Lanjutan (Opsional)", expanded=False):
+          st.slider(
+              "t (tebal strip)", 1, 10, 3, key="sol_t",
+              help="Tebal lapisan piksel tepi yang dicocokkan. Nilai >= 2 memperhitungkan arah gradien tekstur.",
+          )
+          st.slider(
+              "Max kandidat", 1, 10, 5, key="sol_maxc",
+              help="Jumlah kandidat alternatif terbaik yang dicoba per sel saat backtracking.",
+          )
+
+      run = st.button("Solve", type="primary", width="stretch", key="sol_run")
 
     if run:
         try:
@@ -61,7 +56,6 @@ def render():
                 result = adapters.solve_puzzle(
                     input_dir,
                     t=int(st.session_state["sol_t"]),
-                    tau=float(st.session_state["sol_tau"]),
                     max_candidates=int(st.session_state["sol_maxc"]),
                 )
             result["input_dir"] = input_dir
@@ -129,6 +123,11 @@ def render():
     )
     hint_meta = result.get("meta") or {}
     rec_img = result.get("reconstructed")
+    input_dir = result.get("input_dir")
+    frame_img = None
+    if input_dir and os.path.isfile(os.path.join(input_dir, "frame.png")):
+        frame_img = cv2.imread(os.path.join(input_dir, "frame.png"))
+
     if rec_img is not None and getattr(rec_img, "ndim", 0) >= 2:
         rh, rw = rec_img.shape[:2]
         piece_size = (rh // m, rw // m)
@@ -136,7 +135,16 @@ def render():
         piece_size = hint_meta["piece_size"]
     else:
         piece_size = None
-    rv.render_solver_player(result["pieces"], steps, m, piece_size=piece_size)
+
+    hint_width = hint_meta.get("hint_width", 0) if hint_meta.get("has_ring") else 0
+    rv.render_solver_player(
+        result["pieces"],
+        steps,
+        m,
+        piece_size=piece_size,
+        frame=frame_img if frame_img is not None else rec_img,
+        hint_width=hint_width,
+    )
 
     st.download_button(
         "Unduh Animasi Backtracking (GIF)",

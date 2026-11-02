@@ -78,13 +78,32 @@ def resolve_cell_dimensions(m, piece_size=None, pad=6, max_w=940, max_h=680):
     return cell_w, cell_h, grid_w, grid_h
 
 
-def board_state_image(pieces_by_name, steps, upto, m, cell=120, pad=6, piece_size=None):
+def board_state_image(pieces_by_name, steps, upto, m, cell=120, pad=6, piece_size=None, frame=None, hint_width=0):
     state = {}
     for ev in steps[:upto]:
         if ev["type"] == "place":
             state[ev["pos"]] = (ev["pid"], ev["rot"])
         else:
             state.pop(ev["pos"], None)
+
+    if frame is not None and getattr(frame, "ndim", 0) >= 2:
+        canvas = to_rgb(frame).copy()
+        fh, fw = canvas.shape[:2]
+        k = int(hint_width or 0)
+        cw = int((fw - 2 * k) / m)
+        ch = int((fh - 2 * k) / m)
+        for pos, (pid, rot) in state.items():
+            r, c = divmod(pos, m)
+            y, x = k + r * ch, k + c * cw
+            img = np.rot90(to_rgb(pieces_by_name[pid]), (4 - rot // 90) % 4)
+            thumb = cv2.resize(np.ascontiguousarray(img), (cw, ch), interpolation=cv2.INTER_AREA)
+            canvas[y:y + ch, x:x + cw] = thumb
+        if upto > 0:
+            active = steps[upto - 1]["pos"]
+            r, c = divmod(active, m)
+            y, x = k + r * ch, k + c * cw
+            cv2.rectangle(canvas, (x, y), (x + cw - 1, y + ch - 1), (17, 24, 39), max(2, cw // 35))
+        return canvas
 
     if piece_size is None and pieces_by_name:
         sample = next(iter(pieces_by_name.values()))
@@ -143,14 +162,14 @@ def pieces_to_base64_dict(pieces, cell_w=160, cell_h=160):
     return b64_dict
 
 
-def steps_to_gif_bytes(pieces_by_name, steps, m, cell=120, pad=6, duration_ms=120, piece_size=None):
+def steps_to_gif_bytes(pieces_by_name, steps, m, cell=120, pad=6, duration_ms=120, piece_size=None, frame=None, hint_width=0):
     from PIL import Image
 
     frames = []
-    f0 = board_state_image(pieces_by_name, steps, 0, m, cell=cell, pad=pad, piece_size=piece_size)
+    f0 = board_state_image(pieces_by_name, steps, 0, m, cell=cell, pad=pad, piece_size=piece_size, frame=frame, hint_width=hint_width)
     frames.append(Image.fromarray(f0))
     for i in range(1, len(steps) + 1):
-        f = board_state_image(pieces_by_name, steps, i, m, cell=cell, pad=pad, piece_size=piece_size)
+        f = board_state_image(pieces_by_name, steps, i, m, cell=cell, pad=pad, piece_size=piece_size, frame=frame, hint_width=hint_width)
         frames.append(Image.fromarray(f))
     buf = io.BytesIO()
     frames[0].save(
@@ -164,12 +183,14 @@ def steps_to_gif_bytes(pieces_by_name, steps, m, cell=120, pad=6, duration_ms=12
     return buf.getvalue()
 
 
-def build_player_html(pieces_b64, steps, m, cell_w=160, cell_h=160, pad=6):
+def build_player_html(pieces_b64, steps, m, cell_w=160, cell_h=160, pad=0, ox=0, oy=0, grid_w=None, grid_h=None, frame_b64=None):
     import json
 
-    grid_w = m * (cell_w + pad) + pad
-    grid_h = m * (cell_h + pad) + pad
-    max_card_w = max(640, min(1040, grid_w + 40))
+    if grid_w is None:
+        grid_w = int(round(ox + m * (cell_w + pad) + pad))
+    if grid_h is None:
+        grid_h = int(round(oy + m * (cell_h + pad) + pad))
+    max_card_w = max(640, min(1500, int(round(grid_w + 40))))
     clean_steps = []
     for s in steps:
         clean_steps.append({
@@ -248,11 +269,15 @@ def build_player_html(pieces_b64, steps, m, cell_w=160, cell_h=160, pad=6):
     justify-content: center;
     align-items: center;
     box-shadow: inset 0 1px 2px rgba(0,0,0,0.04);
+    width: 100%;
+    max-width: {grid_w}px;
   }}
   canvas {{
     display: block;
+    width: 100%;
     max-width: 100%;
     height: auto;
+    aspect-ratio: {grid_w} / {grid_h};
   }}
   .scrubber-container {{
     width: 100%;
@@ -413,6 +438,9 @@ def build_player_html(pieces_b64, steps, m, cell_w=160, cell_h=160, pad=6):
   const cellW = {cell_w};
   const cellH = {cell_h};
   const pad = {pad};
+  const ox = {ox};
+  const oy = {oy};
+  const frameB64 = {json.dumps(frame_b64) if frame_b64 else 'null'};
   const totalSteps = steps.length;
 
   const canvas = document.getElementById("puzzleCanvas");
@@ -437,6 +465,13 @@ def build_player_html(pieces_b64, steps, m, cell_w=160, cell_h=160, pad=6):
       delete curr[ev.pos];
     }}
     states.push(curr);
+  }}
+
+  let frameImg = null;
+  if (frameB64) {{
+    frameImg = new Image();
+    frameImg.onload = () => {{ drawStep(currentStep); }};
+    frameImg.src = frameB64;
   }}
 
   // Preload pieces
@@ -469,7 +504,7 @@ def build_player_html(pieces_b64, steps, m, cell_w=160, cell_h=160, pad=6):
     stepBadge.innerText = "Langkah " + currentStep + " / " + totalSteps;
 
     if (currentStep === 0) {{
-      statusText.innerHTML = "<span>🏁 Papan awal (kosong)</span>";
+      statusText.innerHTML = "<span>🏁 Papan awal (bingkai generator)</span>";
     }} else {{
       const ev = steps[currentStep - 1];
       const r = Math.floor(ev.pos / m) + 1;
@@ -482,9 +517,30 @@ def build_player_html(pieces_b64, steps, m, cell_w=160, cell_h=160, pad=6):
       }}
     }}
 
-    // Background
-    ctx.fillStyle = "#EEF0F3";
-    ctx.fillRect(0, 0, canvas.width, canvas.height);
+    // Background: draw frameImg if available, else clean board
+    if (frameImg && frameImg.complete && frameImg.naturalWidth > 0) {{
+      ctx.drawImage(frameImg, 0, 0, canvas.width, canvas.height);
+    }} else {{
+      ctx.fillStyle = "#EEF0F3";
+      ctx.fillRect(0, 0, canvas.width, canvas.height);
+
+      for (let r = 0; r < m; r++) {{
+        for (let c = 0; c < m; c++) {{
+          const x = ox + c * (cellW + pad);
+          const y = oy + r * (cellH + pad);
+          ctx.fillStyle = "#FFFFFF";
+          ctx.fillRect(x, y, cellW, cellH);
+          ctx.strokeStyle = "#D1D5DB";
+          ctx.lineWidth = 1;
+          ctx.strokeRect(x, y, cellW, cellH);
+        }}
+      }}
+      if (ox > 0 || oy > 0) {{
+        ctx.strokeStyle = "#9CA3AF";
+        ctx.lineWidth = 2;
+        ctx.strokeRect(ox, oy, m * (cellW + pad), m * (cellH + pad));
+      }}
+    }}
 
     const state = states[currentStep];
 
@@ -492,11 +548,8 @@ def build_player_html(pieces_b64, steps, m, cell_w=160, cell_h=160, pad=6):
     for (let r = 0; r < m; r++) {{
       for (let c = 0; c < m; c++) {{
         const pos = r * m + c;
-        const x = pad + c * (cellW + pad);
-        const y = pad + r * (cellH + pad);
-
-        ctx.fillStyle = "#E4E7EB";
-        ctx.fillRect(x, y, cellW, cellH);
+        const x = ox + c * (cellW + pad);
+        const y = oy + r * (cellH + pad);
 
         if (state && state[pos]) {{
           const item = state[pos];
@@ -521,17 +574,18 @@ def build_player_html(pieces_b64, steps, m, cell_w=160, cell_h=160, pad=6):
       const ev = steps[currentStep - 1];
       const r = Math.floor(ev.pos / m);
       const c = ev.pos % m;
-      const x = pad + c * (cellW + pad);
-      const y = pad + r * (cellH + pad);
+      const x = ox + c * (cellW + pad);
+      const y = oy + r * (cellH + pad);
+      const strokeW = Math.max(3, Math.round(cellW * 0.025));
 
       if (ev.type === "place") {{
         ctx.strokeStyle = "#111827";
-        ctx.lineWidth = 3;
-        ctx.strokeRect(x + 1.5, y + 1.5, cellW - 3, cellH - 3);
+        ctx.lineWidth = strokeW;
+        ctx.strokeRect(x + strokeW / 2, y + strokeW / 2, cellW - strokeW, cellH - strokeW);
       }} else {{
         ctx.strokeStyle = "#FF4B4B";
-        ctx.lineWidth = 3;
-        ctx.strokeRect(x + 1.5, y + 1.5, cellW - 3, cellH - 3);
+        ctx.lineWidth = strokeW;
+        ctx.strokeRect(x + strokeW / 2, y + strokeW / 2, cellW - strokeW, cellH - strokeW);
 
         ctx.beginPath();
         ctx.moveTo(x + cellW * 0.35, y + cellH * 0.35);
@@ -609,24 +663,91 @@ def build_player_html(pieces_b64, steps, m, cell_w=160, cell_h=160, pad=6):
 </html>"""
 
 
-def render_solver_player(pieces, steps, m, cell_w=None, cell_h=None, pad=6, piece_size=None):
+def render_solver_player(
+    pieces,
+    steps,
+    m,
+    cell_w=None,
+    cell_h=None,
+    pad=None,
+    piece_size=None,
+    frame=None,
+    hint_width=0,
+):
+    import base64
     import streamlit.components.v1 as components
 
-    if piece_size is None and pieces:
-        sample = next(iter(pieces.values()))
-        piece_size = sample.shape[:2]
-
-    if cell_w is None or cell_h is None:
-        cell_w, cell_h, grid_w, grid_h = resolve_cell_dimensions(
-            m, piece_size, pad=pad, max_w=940, max_h=680
-        )
+    # Jika bingkai dari generator tersedia, ukuran player sama persis dengan bingkai
+    if frame is not None and getattr(frame, "ndim", 0) >= 2:
+        frame_h, frame_w = int(frame.shape[0]), int(frame.shape[1])
+        k = int(hint_width or 0)
+        ox = k
+        oy = k
+        inner_w = frame_w - 2 * k
+        inner_h = frame_h - 2 * k
+        calc_cell_w = inner_w / m
+        calc_cell_h = inner_h / m
+        grid_w = frame_w
+        grid_h = frame_h
+        calc_pad = 0
+    elif cell_w is not None and cell_h is not None:
+        calc_cell_w = float(cell_w)
+        calc_cell_h = float(cell_h)
+        calc_pad = pad if pad is not None else 6
+        ox = calc_pad
+        oy = calc_pad
+        grid_w = int(m * (calc_cell_w + calc_pad) + calc_pad)
+        grid_h = int(m * (calc_cell_h + calc_pad) + calc_pad)
     else:
-        grid_w = m * (cell_w + pad) + pad
-        grid_h = m * (cell_h + pad) + pad
+        if piece_size is not None and len(piece_size) >= 2 and piece_size[0] > 0 and piece_size[1] > 0:
+            d1, d2 = int(piece_size[0]), int(piece_size[1])
+        elif pieces:
+            sample = next(iter(pieces.values()))
+            d1, d2 = sample.shape[:2]
+        else:
+            d1, d2 = 100, 100
 
-    b64_dict = pieces_to_base64_dict(pieces, cell_w=cell_w, cell_h=cell_h)
-    html = build_player_html(b64_dict, steps, m, cell_w=cell_w, cell_h=cell_h, pad=pad)
-    components.html(html, height=grid_h + 195, scrolling=False)
+        pw = max(d1, d2)
+        ph = min(d1, d2)
+        k = int(hint_width or 0)
+        ox = k
+        oy = k
+        calc_cell_w = float(pw)
+        calc_cell_h = float(ph)
+        grid_w = int(m * pw + 2 * k)
+        grid_h = int(m * ph + 2 * k)
+        calc_pad = 0
+
+    frame_b64 = None
+    if frame is not None and getattr(frame, "ndim", 0) >= 2:
+        rgb_frame = to_rgb(frame)
+        bgr = cv2.cvtColor(rgb_frame, cv2.COLOR_RGB2BGR)
+        ok, buf = cv2.imencode(".jpg", bgr, [int(cv2.IMWRITE_JPEG_QUALITY), 88])
+        if ok:
+            frame_b64 = "data:image/jpeg;base64," + base64.b64encode(buf.tobytes()).decode("ascii")
+
+    thumb_w = max(10, int(round(calc_cell_w)))
+    thumb_h = max(10, int(round(calc_cell_h)))
+    b64_dict = pieces_to_base64_dict(pieces, cell_w=thumb_w, cell_h=thumb_h)
+
+    html = build_player_html(
+        b64_dict,
+        steps,
+        m,
+        cell_w=calc_cell_w,
+        cell_h=calc_cell_h,
+        pad=calc_pad,
+        ox=ox,
+        oy=oy,
+        grid_w=grid_w,
+        grid_h=grid_h,
+        frame_b64=frame_b64,
+    )
+
+    display_w = min(grid_w, 1150)
+    display_h = int(round(display_w * grid_h / grid_w))
+    iframe_h = max(520, display_h + 195)
+    components.html(html, height=iframe_h, scrolling=False)
 
 
 

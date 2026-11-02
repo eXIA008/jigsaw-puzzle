@@ -106,7 +106,7 @@ def generate_puzzle(input_path, out_dir, m=3, hint_width=100, placement="split",
     }
 
 
-def solve_puzzle(input_dir, t=3, tau=2500.0, max_candidates=5, save=True, record_steps=True):
+def solve_puzzle(input_dir, t=3, max_candidates=5, save=True, record_steps=True):
     meta = solver.load_hint_meta(os.path.join(input_dir, "hint_meta.json"))
 
     m = meta["m"]
@@ -114,16 +114,13 @@ def solve_puzzle(input_dir, t=3, tau=2500.0, max_candidates=5, save=True, record
     if len(pieces) != m * m:
         raise ValueError(f"jumlah potongan {len(pieces)} != m*m = {m * m}")
 
-    ring = solver.load_ring(input_dir) if meta["has_ring"] else None
-    ph, pw = meta["piece_size"]
-    t = max(1, min(t, ph, pw))
-    if meta["has_ring"]:
-        t = min(t, meta["hint_width"])
+    ring = solver.load_ring(input_dir) if meta.get("has_ring") else None
 
     steps = [] if record_steps else None
     start = time.perf_counter()
     grid, ok, gaps, confs = solver.solve(
-        pieces, ring, meta, t=t, tau=tau, max_candidates=max_candidates, steps=steps)
+        pieces, ring, meta, t=t, max_candidates=max_candidates, steps=steps
+    )
     elapsed = time.perf_counter() - start
 
     solution = {}
@@ -140,7 +137,6 @@ def solve_puzzle(input_dir, t=3, tau=2500.0, max_candidates=5, save=True, record
         "ok": ok,
         "time_s": round(elapsed, 3),
         "t": t,
-        "tau": tau,
         "max_candidates": max_candidates,
         "gaps": gaps,
         "gap_mean": round(sum(gap_vals) / len(gap_vals), 3) if gap_vals else None,

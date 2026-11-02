@@ -54,9 +54,6 @@ def render():
 
         st.checkbox(
             "Simpan ground_truth.json", value=True, key="gen_truth")
-        if not rv.is_cloud():
-            st.text_input("Output Path", value="", key="gen_out", 
-            help="Directory atau Folder output dari puzzle generator. Kosong = hasil generator disimpan di folder sesi")
 
         run = st.button("Generate", type="primary", width="stretch", key="gen_run")
 

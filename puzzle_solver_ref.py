@@ -233,7 +233,7 @@ def _attempt(pieces, ring, meta, tau, max_candidates, t, allow_rot, max_nodes):
     return (grid if ok else best["grid"]), ok
 
 
-def solve(pieces, ring, meta, tau=TAU, max_candidates=MAX_CANDIDATES, t=T, allow_rot=True):
+def solve(pieces, ring, meta, tau, max_candidates=MAX_CANDIDATES, t=T, allow_rot=True):
     """Coba tau awal; jika buntu/anggaran habis, longgarkan tau (x2) beberapa kali,
     terakhir tanpa ambang."""
     taus = [tau * 2 ** i for i in range(5)] + [float("inf")]

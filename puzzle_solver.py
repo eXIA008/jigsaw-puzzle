@@ -1,369 +1,323 @@
-import argparse
 import json
 import os
-import time
-
 import cv2
 import numpy as np
 
-INPUT_DIR = "hasil"
-T_STRIP = 3
-TAU = 2500.0
-MAX_CANDIDATES = 5
-MAX_NODES = 200000
-SAVE = True
-SHOW = True
-
 
 def load_hint_meta(path):
-    with open(path) as f:
-        meta = json.load(f)
-    meta["piece_size"] = tuple(meta["piece_size"])
-    return meta
+    if not os.path.exists(path):
+        raise FileNotFoundError(f"File metadata tidak ditemukan: {path}")
+    with open(path, "r", encoding="utf-8") as f:
+        return json.load(f)
+
+
+def load_pieces(input_dir):
+    pieces_dir = os.path.join(input_dir, "pieces")
+    if not os.path.isdir(pieces_dir):
+        raise FileNotFoundError(f"Folder keping tidak ditemukan: {pieces_dir}")
+    pieces = {}
+    for fname in sorted(os.listdir(pieces_dir)):
+        if fname.lower().endswith((".png", ".jpg", ".jpeg", ".bmp", ".webp")):
+            fpath = os.path.join(pieces_dir, fname)
+            img = cv2.imread(fpath, cv2.IMREAD_UNCHANGED)
+            if img is not None:
+                # Standardisasi ruang warna: BGRA -> BGR (Operasi Titik)
+                if img.ndim == 3 and img.shape[2] == 4:
+                    img = cv2.cvtColor(img, cv2.COLOR_BGRA2BGR)
+                pieces[fname] = img
+    return pieces
 
 
 def load_ring(input_dir):
+    ring_dir = os.path.join(input_dir, "ring")
+    if not os.path.isdir(ring_dir):
+        return None
     ring = {}
     for side in ("top", "bottom", "left", "right"):
-        path = os.path.join(input_dir, "ring", f"ring_{side}.png")
-        img = cv2.imread(path, cv2.IMREAD_UNCHANGED)
+        p = os.path.join(ring_dir, f"ring_{side}.png")
+        if not os.path.isfile(p):
+            return None
+        img = cv2.imread(p, cv2.IMREAD_UNCHANGED)
         if img is None:
-            raise FileNotFoundError(path)
+            return None
+        if img.ndim == 3 and img.shape[2] == 4:
+            img = cv2.cvtColor(img, cv2.COLOR_BGRA2BGR)
         ring[side] = img
     return ring
 
 
-def load_pieces(input_dir):
-    pieces = {}
-    pieces_dir = os.path.join(input_dir, "pieces")
-    for name in sorted(os.listdir(pieces_dir)):
-        if name.lower().endswith(".png"):
-            img = cv2.imread(os.path.join(pieces_dir, name), cv2.IMREAD_UNCHANGED)
-            if img is None:
-                raise FileNotFoundError(os.path.join(pieces_dir, name))
-            pieces[name] = img
-    return pieces
+def _calc_edge_dissimilarity(strip1, strip2, t=1):
+    """
+    Operasi Aritmatika Pengurangan Citra g(x,y) = |f(x,y) - h(x,y)|
+    dikombinasikan dengan Konvolusi Filter Spasial Diferensial 1D (w03 & w06).
+    """
+    # Konversi tipe data matriks ke float32 untuk menghindari overflow uint8
+    s1 = strip1.astype(np.float32)
+    s2 = strip2.astype(np.float32)
+
+    # 1. Operasi Aritmatika Pengurangan Citra pada garis pertemuan batas terluar
+    # s1[-1] adalah baris terakhir keping atas/kiri, s2[0] adalah baris awal keping bawah/kanan
+    diff_direct = np.abs(s1[-1] - s2[0])
+    l1_cost = float(np.mean(diff_direct))
+
+    # 2. Filter Diferensial Turunan Gradien Pertama jika pita ketetanggaan t >= 2
+    if t >= 2 and s1.shape[0] >= 2 and s2.shape[0] >= 2:
+        grad1 = s1[-1] - s1[-2]
+        grad2 = s2[1] - s2[0]
+
+        # Estimasi kontinuitas alur garis spasial 
+        grad_continuity_error = np.abs(grad1 - grad2)
+        grad_cost = float(np.mean(grad_continuity_error))
+
+        return l1_cost + 0.5 * grad_cost
+
+    return l1_cost
 
 
-def ring_slice(ring, side, idx, meta, t):
-    k = meta["hint_width"]
-    ph, pw = meta["piece_size"]
-    if side == "top":
-        return ring["top"][-t:, k + idx * pw:k + (idx + 1) * pw]
-    if side == "bottom":
-        return ring["bottom"][:t, k + idx * pw:k + (idx + 1) * pw]
-    if side == "left":
-        return ring["left"][k + idx * ph:k + (idx + 1) * ph, -t:]
-    return ring["right"][k + idx * ph:k + (idx + 1) * ph, :t]
-
-
-def extract_edge(img, side, t=3):
-    if side == "top":
-        return img[:t, ...]
-    if side == "bottom":
-        return img[-t:, ...]
-    if side == "left":
-        return img[:, :t, ...]
-    return img[:, -t:, ...]
-
-
-def _as_rows(strip, side):
-    s = strip.astype(np.float32)
-    return np.swapaxes(s, 0, 1) if side in ("left", "right") else s
-
-
-def seam_cost(before, after, side_before):
-    a = _as_rows(before, side_before)
-    b = _as_rows(after, "top" if side_before == "bottom" else "left")
-    d = a - b
-    return float(np.mean(d * d))
-
-
-def seam_parts(cand, r, c, grid, ring, meta, t):
-    m = meta["m"]
-    tk = min(t, meta["hint_width"]) if ring else t
-    parts = []
-    if r > 0:
-        parts.append(seam_cost(extract_edge(grid[r - 1][c][2], "bottom", t),
-                               extract_edge(cand, "top", t), "bottom"))
-    elif ring:
-        parts.append(seam_cost(ring_slice(ring, "top", c, meta, tk),
-                               extract_edge(cand, "top", tk), "bottom"))
-    if c > 0:
-        parts.append(seam_cost(extract_edge(grid[r][c - 1][2], "right", t),
-                               extract_edge(cand, "left", t), "right"))
-    elif ring:
-        parts.append(seam_cost(ring_slice(ring, "left", r, meta, tk),
-                               extract_edge(cand, "left", tk), "right"))
-    if r == m - 1 and ring:
-        parts.append(seam_cost(extract_edge(cand, "bottom", tk),
-                               ring_slice(ring, "bottom", c, meta, tk), "bottom"))
-    if c == m - 1 and ring:
-        parts.append(seam_cost(extract_edge(cand, "right", tk),
-                               ring_slice(ring, "right", r, meta, tk), "right"))
-    return parts
-
-
-def total_score(cand, r, c, grid, ring, meta, t):
-    costs = seam_parts(cand, r, c, grid, ring, meta, t)
-    return float(np.mean(costs)) if costs else 0.0
-
-
-def _grid_seam_mean(grid, ring, meta, t):
+def _score_placement(cand_img, r, c, m, grid, ring, ph, pw, k, t):
+    """
+    Evaluasi kompatibilitas spasial kandidat keping terhadap batas tetangga
+    dan ring pembatas bingkai dengan koordinat pergeseran spasial yang presisi.
+    """
     costs = []
-    for r, row in enumerate(grid):
-        for c, cell in enumerate(row):
-            if cell is not None:
-                costs += seam_parts(cell[2], r, c, grid, ring, meta, t)
-    return float(np.mean(costs)) if costs else 0.0
+
+    # 1. Batas Atas
+    if r > 0 and grid[r - 1][c] is not None:
+        neighbor = grid[r - 1][c][2]
+        cost = _calc_edge_dissimilarity(neighbor[-t:, :], cand_img[:t, :], t=t)
+        costs.append(cost)
+    elif r == 0 and ring is not None:
+        ring_strip = ring["top"][-t:, k + c * pw : k + (c + 1) * pw]
+        cost = _calc_edge_dissimilarity(ring_strip, cand_img[:t, :], t=t)
+        costs.append(cost)
+
+    # 2. Batas Bawah
+    if r < m - 1 and grid[r + 1][c] is not None:
+        neighbor = grid[r + 1][c][2]
+        cost = _calc_edge_dissimilarity(cand_img[-t:, :], neighbor[:t, :], t=t)
+        costs.append(cost)
+    elif r == m - 1 and ring is not None:
+        ring_strip = ring["bottom"][:t, k + c * pw : k + (c + 1) * pw]
+        cost = _calc_edge_dissimilarity(cand_img[-t:, :], ring_strip, t=t)
+        costs.append(cost)
+
+    # 3. Batas Kiri
+    if c > 0 and grid[r][c - 1] is not None:
+        neighbor = grid[r][c - 1][2]
+        s1 = np.transpose(neighbor[:, -t:], (1, 0, 2))
+        s2 = np.transpose(cand_img[:, :t], (1, 0, 2))
+        cost = _calc_edge_dissimilarity(s1, s2, t=t)
+        costs.append(cost)
+    elif c == 0 and ring is not None:
+        ring_strip = np.transpose(ring["left"][k + r * ph : k + (r + 1) * ph, -t:], (1, 0, 2))
+        cand_strip = np.transpose(cand_img[:, :t], (1, 0, 2))
+        cost = _calc_edge_dissimilarity(ring_strip, cand_strip, t=t)
+        costs.append(cost)
+
+    # 4. Batas Kanan
+    if c < m - 1 and grid[r][c + 1] is not None:
+        neighbor = grid[r][c + 1][2]
+        s1 = np.transpose(cand_img[:, -t:], (1, 0, 2))
+        s2 = np.transpose(neighbor[:, :t], (1, 0, 2))
+        cost = _calc_edge_dissimilarity(s1, s2, t=t)
+        costs.append(cost)
+    elif c == m - 1 and ring is not None:
+        ring_strip = np.transpose(ring["right"][k + r * ph : k + (r + 1) * ph, :t], (1, 0, 2))
+        cand_strip = np.transpose(cand_img[:, -t:], (1, 0, 2))
+        cost = _calc_edge_dissimilarity(cand_strip, ring_strip, t=t)
+        costs.append(cost)
+
+    if not costs:
+        return 0.0, 0
+
+    # Kombinasi mean penalty dan max penalty untuk mendeteksi inkonsistensi sisi
+    score = 0.6 * float(np.mean(costs)) + 0.4 * float(np.max(costs))
+    return score, len(costs)
 
 
-class _Budget(Exception):
-    pass
-
-
-def _attempt(pieces, ring, meta, tau, max_candidates, t, max_nodes, steps=None, stop_mean=None):
+def solve(pieces, ring, meta, t=3, max_candidates=5, steps=None):
+    """
+    Algoritma Penataan Heuristik Berbasis Keyakinan (Confidence-Guided Search)
+    dengan Pencatatan Riwayat Eksekusi (Backtracking) untuk GUI.
+    """
     m = meta["m"]
-    shape0 = tuple(meta["piece_size"])
-    grid = [[None] * m for _ in range(m)]
-    used = set()
-    best = {"depth": -1, "grid": None}
-    nodes = [0]
-    budget_hit = [False]
-    best_completion = [None, None, None]
-    gap_map = {}
+    ph, pw = meta["piece_size"]
+    has_ring = meta.get("has_ring", False)
+    k = int(meta.get("hint_width", 0)) if has_ring else 0
+    t = max(1, min(t, ph, pw))
+    if has_ring and k > 0:
+        t = min(t, k)
 
-    def backtrack(pos):
-        if pos > best["depth"]:
-            best["depth"] = pos
-            best["grid"] = [row[:] for row in grid]
-        if pos == m * m:
-            if ring is not None or stop_mean is None:
-                return True
-            mean = _grid_seam_mean(grid, ring, meta, t)
-            if best_completion[0] is None or mean < best_completion[0]:
-                best_completion[0] = mean
-                best_completion[1] = [row[:] for row in grid]
-                best_completion[2] = dict(gap_map)
-            return False
-        nodes[0] += 1
-        if nodes[0] > max_nodes:
-            budget_hit[0] = True
-            raise _Budget
-        r, c = divmod(pos, m)
-        cands = []
-        for name, img in pieces.items():
-            if name in used:
+    # Pra-komputasi Transformasi Geometri Rotasi Ortogonal (0, 90, 180, 270 derajat CW)
+    cached_pieces = {}
+    for pid, img in pieces.items():
+        rot_list = []
+        for rot_k in (0, 1, 2, 3):
+            rot_img = np.rot90(img, k=rot_k, axes=(1, 0)).copy()
+            if rot_img.shape[0] == ph and rot_img.shape[1] == pw:
+                rot_list.append((rot_k, rot_img))
+        cached_pieces[pid] = rot_list
+
+    grid = [[None for _ in range(m)] for _ in range(m)]
+    used_pids = set()
+    gaps = []
+    confs = []
+
+    def get_candidate_rankings_for_slot(r, c):
+        candidates = []
+        for pid, rots in cached_pieces.items():
+            if pid in used_pids:
                 continue
-            for rot in range(4):
-                im = np.rot90(img, rot)
-                if im.shape[:2] != shape0:
+            for rot_k, rot_img in rots:
+                score, num_c = _score_placement(rot_img, r, c, m, grid, ring, ph, pw, k, t)
+                if num_c > 0:
+                    candidates.append((score, pid, rot_k, rot_img))
+        candidates.sort(key=lambda x: x[0])
+        return candidates
+
+    def select_best_slot_by_confidence():
+        best_slot = None
+        best_ranking = None
+        max_priority = -float("inf")
+
+        for r in range(m):
+            for c in range(m):
+                if grid[r][c] is not None:
                     continue
-                s = total_score(im, r, c, grid, ring, meta, t)
-                if s <= tau:
-                    cands.append((s, name, rot, im))
-        cands.sort(key=lambda x: x[0])
-        window = max_candidates
-        if pos == 0 and ring is None:
-            window = len(cands)
-        for i, (s, name, rot, im) in enumerate(cands[:window]):
-            gap_map[pos] = cands[i + 1][0] - s if i + 1 < len(cands) else float("inf")
-            grid[r][c] = (name, rot, im, s)
-            used.add(name)
+
+                num_c = 0
+                if r > 0 and grid[r - 1][c] is not None: num_c += 1
+                elif r == 0 and ring is not None: num_c += 1
+
+                if r < m - 1 and grid[r + 1][c] is not None: num_c += 1
+                elif r == m - 1 and ring is not None: num_c += 1
+
+                if c > 0 and grid[r][c - 1] is not None: num_c += 1
+                elif c == 0 and ring is not None: num_c += 1
+
+                if c < m - 1 and grid[r][c + 1] is not None: num_c += 1
+                elif c == m - 1 and ring is not None: num_c += 1
+
+                if num_c == 0:
+                    continue
+
+                ranking = get_candidate_rankings_for_slot(r, c)
+                if not ranking:
+                    return None, None
+
+                s1 = ranking[0][0]
+                s2 = ranking[1][0] if len(ranking) > 1 else (s1 + 50.0)
+                gap = s2 - s1
+
+                # Prioritaskan slot dengan batasan aktif banyak dan kepastian perbedaan skor tinggi
+                priority = (num_c * 100.0) + gap - (s1 * 0.1)
+                if priority > max_priority:
+                    max_priority = priority
+                    best_slot = (r, c)
+                    best_ranking = ranking
+
+        return best_slot, best_ranking
+
+    def backtrack():
+        if len(used_pids) == m * m:
+            return True
+
+        slot, ranking = select_best_slot_by_confidence()
+        if slot is None:
+            for r in range(m):
+                for c in range(m):
+                    if grid[r][c] is None:
+                        slot = (r, c)
+                        break
+                if slot: break
+            ranking = []
+            for pid, rots in cached_pieces.items():
+                if pid not in used_pids:
+                    ranking.append((0.0, pid, rots[0][0], rots[0][1]))
+
+        r, c = slot
+        pos_idx = r * m + c
+        branch_candidates = ranking[:max_candidates]
+        if not branch_candidates:
+            return False
+
+        for idx, (score, pid, rot_k, rot_img) in enumerate(branch_candidates):
+            s1 = score
+            s2 = branch_candidates[1][0] if len(branch_candidates) > 1 else (s1 + 10.0)
+            cur_gap = s2 - s1
+            cur_conf = 1.0 - (s1 / (s2 + 1e-4))
+
+            grid[r][c] = (pid, rot_k, rot_img, score)
+            used_pids.add(pid)
+            gaps.append(round(float(cur_gap), 2))
+            confs.append(round(float(cur_conf), 3))
+
             if steps is not None:
-                steps.append({"type": "place", "pos": pos, "pid": name,
-                              "rot": ((4 - rot) % 4) * 90, "score": s})
-            if backtrack(pos + 1):
+                steps.append({
+                    "type": "place",
+                    "pos": pos_idx,
+                    "pid": pid,
+                    "rot": rot_k * 90,
+                    "score": float(score),
+                })
+
+            if backtrack():
                 return True
+
+            # Mundur (Backtrack):
             grid[r][c] = None
-            used.discard(name)
+            used_pids.remove(pid)
+            if gaps: gaps.pop()
+            if confs: confs.pop()
+
             if steps is not None:
-                steps.append({"type": "unplace", "pos": pos, "pid": name,
-                              "rot": ((4 - rot) % 4) * 90})
+                steps.append({
+                    "type": "remove",
+                    "pos": pos_idx,
+                    "pid": pid,
+                    "rot": rot_k * 90,
+                    "score": float(score),
+                })
+
         return False
 
-    try:
-        ok = backtrack(0)
-    except _Budget:
-        ok = False
-    if ring is not None or stop_mean is None:
-        return (grid if ok else best["grid"]), ok, gap_map, None, budget_hit[0]
-    if best_completion[0] is not None and best_completion[0] <= stop_mean:
-        return best_completion[1], True, best_completion[2], best_completion[0], budget_hit[0]
-    if best_completion[0] is not None:
-        return best_completion[1], False, best_completion[2], best_completion[0], budget_hit[0]
-    return (grid if ok else best["grid"]), False, gap_map, None, budget_hit[0]
-
-
-def solve(pieces, ring, meta, t=T_STRIP, tau=TAU, max_candidates=MAX_CANDIDATES, steps=None):
-    taus = [tau * 2 ** i for i in range(5)] + [float("inf")]
-    best_partial = None
-    best_completed = None
-    selected = None
-    ok = False
-    last_level = 0
-    for level, tv in enumerate(taus):
-        last_level = level
-        if steps:
-            steps.clear()
-        grid_a, ok_a, gap_map_a, mean_a, budget_a = _attempt(
-            pieces, ring, meta, tv, max_candidates, t, MAX_NODES, steps,
-            stop_mean=None if ring is not None else tau)
-        if ok_a:
-            selected = (grid_a, gap_map_a, level)
-            ok = True
-            print(f"Solusi ditemukan dengan tau={tv}")
-            break
-        if ring is not None:
-            print(f"Buntu pada tau={tv}, melonggarkan ambang...")
-            placed = sum(1 for row in grid_a for cell in row if cell is not None)
-            if best_partial is None or placed > best_partial[0]:
-                best_partial = (placed, grid_a, gap_map_a, level)
-            continue
-        if mean_a is not None:
-            if best_completed is None or mean_a < best_completed[0]:
-                best_completed = (mean_a, grid_a, gap_map_a, level)
-            if not budget_a:
-                break
-        placed = sum(1 for row in grid_a for cell in row if cell is not None)
-        if best_partial is None or placed > best_partial[0]:
-            best_partial = (placed, grid_a, gap_map_a, level)
-    if selected is None and best_completed is not None:
-        _, grid_a, gap_map_a, level = best_completed
-        selected = (grid_a, gap_map_a, level)
-        ok = True
-        print(f"Solusi tersusun dengan tau={taus[level]}")
-    if selected is None and best_partial is not None:
-        _, grid_a, gap_map_a, level = best_partial
-        selected = (grid_a, gap_map_a, level)
-    if selected is not None and steps is not None and selected[2] != last_level:
-        steps.clear()
-        _attempt(pieces, ring, meta, taus[selected[2]], max_candidates, t, MAX_NODES, steps,
-                 stop_mean=None if ring is not None else tau)
-    if selected is None:
-        return None, False, [], []
-    grid, gap_map, _ = selected
-    m = meta["m"]
-    gaps = [None] * (m * m)
-    confs = [None] * (m * m)
-    for pos in range(m * m):
-        r, c = divmod(pos, m)
-        cell = grid[r][c]
-        if cell is not None and np.isfinite(gap_map.get(pos, float("inf"))):
-            g = gap_map[pos]
-            gaps[pos] = g
-            confs[pos] = g / (cell[3] + g) if (cell[3] + g) > 0 else 0.0
-    return grid, ok, gaps, confs
+    success = backtrack()
+    return grid, success, gaps, confs
 
 
 def reconstruct_image(grid, ring, meta):
+    """
+    Operasi Geometri Translasi Spasial Citra: Menyusun mosaik keping
+    ke koordinat piksel global pada kanvas citra utuh.
+    """
     m = meta["m"]
     ph, pw = meta["piece_size"]
-    has_ring = meta["has_ring"]
-    k = meta["hint_width"] if has_ring else 0
-    ref = next((cell[2] for row in grid for cell in row if cell is not None), None)
-    if ref is None:
-        return None
-    h, w = 2 * k + m * ph, 2 * k + m * pw
-    canvas = np.zeros((h, w) + ref.shape[2:], dtype=ref.dtype)
-    if has_ring:
+    has_ring = meta.get("has_ring", False)
+    k = int(meta.get("hint_width", 0)) if has_ring else 0
+
+    if has_ring and ring is not None and k > 0:
+        total_h = m * ph + 2 * k
+        total_w = m * pw + 2 * k
+        canvas = np.zeros((total_h, total_w, 3), dtype=np.uint8)
+
         canvas[:k, :] = ring["top"]
         canvas[-k:, :] = ring["bottom"]
         canvas[:, :k] = ring["left"]
         canvas[:, -k:] = ring["right"]
-    for r in range(m):
-        for c in range(m):
-            if grid[r][c] is not None:
-                canvas[k + r * ph:k + (r + 1) * ph, k + c * pw:k + (c + 1) * pw] = grid[r][c][2]
-    return canvas
 
-
-def show(reconstructed, input_dir):
-    import matplotlib.pyplot as plt
-
-    def rgb(x):
-        return cv2.cvtColor(x, cv2.COLOR_BGR2RGB) if x.ndim == 3 else x
-
-    kw = {} if reconstructed.ndim == 3 else {"cmap": "gray", "vmin": 0, "vmax": 255}
-    fig = plt.figure(figsize=(10, 5))
-    ax = fig.add_subplot(1, 2, 1)
-    ax.imshow(rgb(reconstructed), **kw)
-    ax.set_title("Rekonstruksi solver")
-    ax.axis("off")
-    frame = cv2.imread(os.path.join(input_dir, "frame.png"), cv2.IMREAD_UNCHANGED)
-    if frame is not None:
-        ax = fig.add_subplot(1, 2, 2)
-        ax.imshow(rgb(frame), **kw)
-        ax.set_title("Bingkai generator")
-        ax.axis("off")
-    plt.show()
-
-
-def main():
-    ap = argparse.ArgumentParser()
-    ap.add_argument("--input_dir", default=INPUT_DIR, help="folder hasil dari puzzle_generator.py")
-    ap.add_argument("--t", type=int, default=T_STRIP, help="tebal strip pembanding")
-    ap.add_argument("--tau", type=float, default=TAU, help="ambang rata-rata MSE per sisi")
-    ap.add_argument("--max_candidates", type=int, default=MAX_CANDIDATES)
-    ap.add_argument("--save", action=argparse.BooleanOptionalAction, default=SAVE)
-    ap.add_argument("--show", action=argparse.BooleanOptionalAction, default=SHOW)
-    a = ap.parse_args()
-
-    meta = load_hint_meta(os.path.join(a.input_dir, "hint_meta.json"))
-
-    m = meta["m"]
-    pieces = load_pieces(a.input_dir)
-    if len(pieces) != m * m:
-        raise SystemExit(f"jumlah potongan {len(pieces)} != m*m = {m * m}")
-
-    ring = load_ring(a.input_dir) if meta["has_ring"] else None
-    t = a.t
-    if meta["has_ring"]:
-        t = min(t, meta["hint_width"])
+        for r in range(m):
+            for c in range(m):
+                cell = grid[r][c]
+                if cell is not None:
+                    y1 = k + r * ph
+                    x1 = k + c * pw
+                    canvas[y1 : y1 + ph, x1 : x1 + pw] = cell[2]
+        return canvas
     else:
-        print("PERINGATAN: tanpa ring, pencocokan hanya antar potongan (rentan ambigu).")
-
-    start = time.perf_counter()
-    grid, ok, gaps, confs = solve(pieces, ring, meta, t=t, tau=a.tau, max_candidates=a.max_candidates)
-    elapsed = time.perf_counter() - start
-
-    solution = {}
-    for r in range(m):
-        for c in range(m):
-            cell = grid[r][c]
-            if cell is not None:
-                pid, rot, im, s = cell
-                solution[pid] = [r, c, ((4 - rot) % 4) * 90]
-
-    gap_vals = [g for g in gaps if g is not None]
-    conf_vals = [x for x in confs if x is not None]
-    solve_meta = {
-        "ok": ok,
-        "time_s": round(elapsed, 3),
-        "t": t,
-        "tau": a.tau,
-        "max_candidates": a.max_candidates,
-        "gaps": gaps,
-        "gap_mean": round(sum(gap_vals) / len(gap_vals), 3) if gap_vals else None,
-        "confidences": confs,
-        "confidence_mean": round(sum(conf_vals) / len(conf_vals), 3) if conf_vals else None,
-    }
-
-    if a.save:
-        with open(os.path.join(a.input_dir, "solution.json"), "w") as f:
-            json.dump(solution, f, indent=2)
-        with open(os.path.join(a.input_dir, "solve_meta.json"), "w") as f:
-            json.dump(solve_meta, f, indent=2)
-        rec = reconstruct_image(grid, ring, meta)
-        if rec is not None:
-            cv2.imwrite(os.path.join(a.input_dir, "reconstructed.png"), rec)
-
-    print(f"Selesai {elapsed:.2f} s | ok={ok} | terisi {len(solution)}/{m * m} | gap_mean={solve_meta['gap_mean']}")
-    if a.show:
-        rec = reconstruct_image(grid, ring, meta)
-        if rec is not None:
-            show(rec, a.input_dir)
-
-
-if __name__ == "__main__":
-    main()
+        canvas = np.zeros((m * ph, m * pw, 3), dtype=np.uint8)
+        for r in range(m):
+            for c in range(m):
+                cell = grid[r][c]
+                if cell is not None:
+                    canvas[r * ph : (r + 1) * ph, c * pw : (c + 1) * pw] = cell[2]
+        return canvas
